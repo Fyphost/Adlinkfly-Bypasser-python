@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adlinkfly-resolver"
+version = "1.0.0"
+description = "Production-ready API that resolves supported AdLinkFly-based shortened URLs."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Adlinkfly-Bypasser-python contributors" }]
+keywords = ["adlinkfly", "url-shortener", "fastapi", "cloudscraper", "playwright"]
+
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "pydantic>=2.7,<3.0",
+    "pydantic-settings>=2.3,<3.0",
+    "cloudscraper>=1.2.71,<2.0",
+    "playwright>=1.47,<2.0",
+    "beautifulsoup4>=4.12,<5.0",
+    "lxml>=5.2,<6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.urls]
+Repository = "https://github.com/Fyphost/Adlinkfly-Bypasser-python"
+
+[tool.setuptools]
+packages = ["app"]
+
+# --------------------------------------------------------------------------- #
+# Ruff                                                                        #
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RUF"]
+# B008: FastAPI idiomatically calls Depends()/Security() in argument defaults.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may reach into "private" attributes and define local helper classes.
+# E402: importorskip() guards must run before the guarded app imports.
+"tests/*" = ["SLF001", "E402"]
+
+# --------------------------------------------------------------------------- #
+# mypy                                                                        #
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+# Several runtime dependencies (cloudscraper, bs4, lxml) ship without type
+# stubs; don't fail on their missing types.
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------- #
+# pytest                                                                      #
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "browser: tests that require a real Playwright/Chromium install (opt-in).",
+    "integration: tests that reach external services (opt-in; off by default).",
+]
