@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     http_read_timeout: float = 20.0
     max_redirects: int = 10
     max_response_bytes: int = 3_000_000
+    #: Wall-clock budget for the whole cloudscraper phase. If exceeded the
+    #: resolver abandons the HTTP attempt and falls back to the browser, so a
+    #: slow/hanging upstream cannot consume the entire request budget.
+    http_phase_timeout: float = 20.0
+    #: cloudscraper's internal challenge-solving delay (seconds).
+    cloudscraper_delay: float = 3.0
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -82,8 +88,16 @@ class Settings(BaseSettings):
     browser_headless: bool = True
     browser_navigation_timeout_ms: int = 20_000
     browser_max_steps: int = 8
-    browser_countdown_max_seconds: float = 30.0
+    browser_countdown_max_seconds: float = 20.0
     browser_slow_mo_ms: int = 0
+    #: Short, bounded wait used to let dynamic content settle after an action.
+    #: Replaces open-ended ``networkidle`` waits, which never settle on
+    #: ad-heavy shortener pages.
+    browser_settle_timeout_ms: int = 2_500
+    #: Safety margin (seconds) subtracted from the remaining request budget when
+    #: computing the browser's internal deadline, so it returns a structured
+    #: result just before the hard overall timeout would fire.
+    browser_time_margin_seconds: float = 2.0
 
     # ----- Resolver ----------------------------------------------------- #
     resolve_total_timeout: float = 60.0

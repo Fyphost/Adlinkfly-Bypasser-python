@@ -171,12 +171,16 @@ values accept a comma-separated string or a JSON array.
 | `HTTP_READ_TIMEOUT` | `20` | cloudscraper read timeout (s). |
 | `MAX_REDIRECTS` | `10` | Max redirects followed on the HTTP path. |
 | `MAX_RESPONSE_BYTES` | `3000000` | Cap on response body read. |
+| `HTTP_PHASE_TIMEOUT` | `20` | Wall-clock cap (s) for the cloudscraper phase before falling back to the browser. |
+| `CLOUDSCRAPER_DELAY` | `3` | cloudscraper challenge-solving delay (s). |
 | `USER_AGENT` | _(Chrome UA)_ | User agent for HTTP + browser. |
 | `ENABLE_BROWSER` | `true` | Enable the Playwright fallback. |
 | `BROWSER_HEADLESS` | `true` | Run Chromium headless. |
 | `BROWSER_NAVIGATION_TIMEOUT_MS` | `20000` | Per-navigation timeout. |
 | `BROWSER_MAX_STEPS` | `8` | Max navigation steps per resolve. |
-| `BROWSER_COUNTDOWN_MAX_SECONDS` | `30` | Max time to wait out a countdown. |
+| `BROWSER_COUNTDOWN_MAX_SECONDS` | `20` | Max time to wait out a countdown. |
+| `BROWSER_SETTLE_TIMEOUT_MS` | `2500` | Short bounded settle wait after an action (replaces `networkidle`). |
+| `BROWSER_TIME_MARGIN_SECONDS` | `2` | Margin reserved so the browser returns before the overall timeout fires. |
 | `BROWSER_SLOW_MO_MS` | `0` | Slow-motion delay (debugging). |
 | `RESOLVE_TOTAL_TIMEOUT` | `60` | Overall per-request time budget (s). |
 | `MAX_CONCURRENT_RESOLVES` | `10` | Global in-flight resolve limit. |
@@ -347,7 +351,7 @@ mypy app               # type-check
 | Everything returns `verification_required` | The target genuinely requires a CAPTCHA/human step; it cannot be automated. |
 | `unsupported_domain` | Add the domain to `SUPPORTED_DOMAINS` (only if authorised). |
 | `invalid_url` for a public URL | Check scheme is `http(s)`, no embedded credentials, and DNS resolves to a public IP. |
-| Resolves are slow / time out | Tune `RESOLVE_TOTAL_TIMEOUT`, `BROWSER_NAVIGATION_TIMEOUT_MS`, and concurrency limits. |
+| `status: "timeout"` | Send `"include_meta": true` to see `resolved_via` (which phase stalled). Tune `HTTP_PHASE_TIMEOUT`, `BROWSER_NAVIGATION_TIMEOUT_MS`, `BROWSER_MAX_STEPS`, `RESOLVE_TOTAL_TIMEOUT`. The resolver splits the budget between a bounded cloudscraper phase and a deadline-bounded browser phase and avoids open-ended `networkidle` waits, so timeouts should be rare and always report their phase. |
 
 ## License
 

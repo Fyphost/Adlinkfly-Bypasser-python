@@ -51,6 +51,19 @@ class _Resolution:
     steps: int | None = None
 
 
+@dataclass(slots=True)
+class _Trace:
+    """Mutable progress tracker so outcomes (incl. timeouts) are diagnosable.
+
+    Updated as the pipeline advances; read by :meth:`LinkResolver.resolve` even
+    when the pipeline is cancelled by the overall timeout, so the response can
+    report which phase was active and how far the browser got.
+    """
+
+    via: str | None = None
+    steps: int | None = None
+
+
 class LinkResolver:
     """Resolve supported AdLinkFly shortened URLs to their destination."""
 
@@ -77,14 +90,25 @@ class LinkResolver:
         """Resolve ``url`` and return a :class:`ResolveResponse`."""
 
         start = time.monotonic()
+        trace = _Trace()
         try:
             async with self._semaphore:
                 resolution = await asyncio.wait_for(
-                    self._pipeline(url), timeout=self.settings.resolve_total_timeout
+                    self._pipeline(url, trace, start),
+                    timeout=self.settings.resolve_total_timeout,
                 )
         except TimeoutError:
-            logger.info("resolution timed out", extra={"url": _safe(url)})
-            resolution = _Resolution(ResolveStatus.TIMEOUT)
+            logger.info(
+                "resolution timed out",
+                extra={"url": _safe(url), "phase": trace.via, "steps": trace.steps},
+            )
+            phase = f" during the {trace.via} phase" if trace.via else ""
+            resolution = _Resolution(
+                ResolveStatus.TIMEOUT,
+                message=f"Resolution timed out{phase} before a destination could be determined",
+                via=trace.via,
+                steps=trace.steps,
+            )
         except ResolverError as exc:
             logger.info(
                 "resolution rejected",
@@ -102,7 +126,7 @@ class LinkResolver:
     # ------------------------------------------------------------------ #
     # Pipeline                                                            #
     # ------------------------------------------------------------------ #
-    async def _pipeline(self, url: str) -> _Resolution:
+    async def _pipeline(self, url: str, trace: _Trace, start: float) -> _Resolution:
         # 1. Validate (syntax + DNS + SSRF). DNS is blocking -> run in a thread.
         validated = await asyncio.to_thread(self.validator.validate, url)
         source_host = validated.parsed.host
@@ -110,20 +134,42 @@ class LinkResolver:
         # 2. Authorisation: only supported shortener domains may be automated.
         self.validator.ensure_supported_domain(source_host, self.settings.supported_domains)
 
-        # 3. Fast path: cloudscraper.
-        http_outcome = await self._try_http(validated.parsed.url, validated, source_host)
+        # 3. Fast path: cloudscraper, bounded by its own phase budget so a slow
+        #    upstream cannot consume the entire request.
+        trace.via = "http"
+        try:
+            http_outcome = await asyncio.wait_for(
+                self._try_http(validated.parsed.url, validated, source_host),
+                timeout=self.settings.http_phase_timeout,
+            )
+        except TimeoutError:
+            logger.info(
+                "cloudscraper phase exceeded %.1fs; falling back to browser",
+                self.settings.http_phase_timeout,
+            )
+            http_outcome = None
         if http_outcome is not None:
             return http_outcome
 
-        # 4. Browser fallback.
+        # 4. Browser fallback, given whatever time remains in the budget.
         if self.settings.enable_browser:
-            return await self._try_browser(validated.parsed.url, source_host)
+            trace.via = "browser"
+            budget = self._remaining_budget(start)
+            return await self._try_browser(validated.parsed.url, source_host, trace, budget)
 
         return _Resolution(
             ResolveStatus.FAILED,
             message="Static resolution failed and browser automation is disabled",
             via="http",
         )
+
+    def _remaining_budget(self, start: float) -> float:
+        """Seconds left for the browser phase, leaving a safety margin."""
+
+        elapsed = time.monotonic() - start
+        remaining = self.settings.resolve_total_timeout - elapsed
+        remaining -= self.settings.browser_time_margin_seconds
+        return max(1.0, remaining)
 
     async def _try_http(self, url: str, validated, source_host: str) -> _Resolution | None:
         """Attempt HTTP resolution. Return a terminal result, or ``None`` to fall back."""
@@ -181,14 +227,19 @@ class LinkResolver:
             via="http",
         )
 
-    async def _try_browser(self, url: str, source_host: str) -> _Resolution:
+    async def _try_browser(
+        self, url: str, source_host: str, trace: _Trace, budget: float
+    ) -> _Resolution:
         async with self._browser_semaphore:
             try:
-                result = await self.browser_agent.resolve(url, source_host=source_host)
+                result = await self.browser_agent.resolve(
+                    url, source_host=source_host, budget=budget
+                )
             except ResolverError as exc:
                 logger.info("browser resolution error: %s", exc.message)
                 return _Resolution(exc.status, message=exc.message, via="browser")
 
+        trace.steps = result.steps
         if result.status is ResolveStatus.RESOLVED and result.destination_url:
             dest = await self._validate_destination(result.destination_url)
             if dest:
