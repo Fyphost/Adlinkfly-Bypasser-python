@@ -70,7 +70,7 @@ class HttpFetchResult:
         return 200 <= self.status_code < 300
 
 
-def _default_session_factory(user_agent: str) -> Callable[[], Any]:
+def _default_session_factory(user_agent: str, delay: float) -> Callable[[], Any]:
     """Build the default cloudscraper session factory bound to ``user_agent``."""
 
     def factory() -> Any:
@@ -79,7 +79,7 @@ def _default_session_factory(user_agent: str) -> Callable[[], Any]:
 
         return cloudscraper.create_scraper(
             browser={"custom": user_agent},
-            delay=5,
+            delay=delay,
         )
 
     return factory
@@ -97,6 +97,7 @@ class CloudscraperClient:
         max_redirects: int = 10,
         max_response_bytes: int = 3_000_000,
         user_agent: str = "Mozilla/5.0",
+        delay: float = 5.0,
         session_factory: SessionFactory | None = None,
     ) -> None:
         self.validator = validator
@@ -105,7 +106,7 @@ class CloudscraperClient:
         self.max_redirects = max_redirects
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
-        self._session_factory = session_factory or _default_session_factory(user_agent)
+        self._session_factory = session_factory or _default_session_factory(user_agent, delay)
 
     async def fetch(
         self, url: str, *, validated: ValidationResult | None = None

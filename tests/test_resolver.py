@@ -70,8 +70,11 @@ class FakeHttp:
 
 
 class SlowHttp:
+    def __init__(self, delay=0.3):
+        self.delay = delay
+
     async def fetch(self, url, *, validated=None):
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(self.delay)
         return HttpFetchResult(url=url, status_code=200, html="", content_type="text/html")
 
 
@@ -80,21 +83,37 @@ class FakeBrowser:
         self.result = result
         self.exc = exc
         self.calls = 0
+        self.last_budget = None
 
-    async def resolve(self, url, *, source_host):
+    async def resolve(self, url, *, source_host, budget=None):
         self.calls += 1
+        self.last_budget = budget
         if self.exc is not None:
             raise self.exc
         return self.result
 
 
-def build_resolver(*, http, browser, enable_browser=True, total_timeout=30.0):
+class SlowBrowser:
+    def __init__(self, delay=0.3):
+        self.delay = delay
+
+    async def resolve(self, url, *, source_host, budget=None):
+        await asyncio.sleep(self.delay)
+        return BrowserResult(
+            status=ResolveStatus.RESOLVED, destination_url="https://example.com/final", steps=1
+        )
+
+
+def build_resolver(
+    *, http, browser, enable_browser=True, total_timeout=30.0, http_phase_timeout=20.0
+):
     validator = URLValidator(dns_resolver=dns_resolver, allow_private=False)
     settings = Settings(
         _env_file=None,
         supported_domains={"arolinks.com"},
         enable_browser=enable_browser,
         resolve_total_timeout=total_timeout,
+        http_phase_timeout=http_phase_timeout,
     )
     return LinkResolver(settings, validator, PageAnalyzer(), http, browser)
 
@@ -246,3 +265,39 @@ def test_overall_timeout():
     resolver = build_resolver(http=SlowHttp(), browser=FakeBrowser(), total_timeout=0.05)
     resp = resolve(resolver, "https://arolinks.com/abc")
     assert resp.status is ResolveStatus.TIMEOUT
+
+
+def test_http_phase_timeout_falls_back_to_browser():
+    # cloudscraper is slow; the HTTP phase budget elapses and we use the browser.
+    browser = FakeBrowser(
+        result=BrowserResult(
+            status=ResolveStatus.RESOLVED, destination_url="https://example.com/final", steps=1
+        )
+    )
+    resolver = build_resolver(
+        http=SlowHttp(delay=0.3),
+        browser=browser,
+        enable_browser=True,
+        total_timeout=5.0,
+        http_phase_timeout=0.05,
+    )
+    resp = resolve(resolver, "https://arolinks.com/abc")
+    assert resp.status is ResolveStatus.RESOLVED
+    assert browser.calls == 1
+    # The browser was handed a positive remaining budget.
+    assert browser.last_budget is not None and browser.last_budget > 0
+
+
+def test_timeout_reports_phase_in_meta():
+    # HTTP falls back immediately (challenge); the browser then runs past the
+    # overall budget. The timeout must report that it happened in the browser.
+    resolver = build_resolver(
+        http=FakeHttp(exc=ChallengeError("blocked")),
+        browser=SlowBrowser(delay=0.3),
+        enable_browser=True,
+        total_timeout=0.1,
+    )
+    resp = resolve(resolver, "https://arolinks.com/abc", include_meta=True)
+    assert resp.status is ResolveStatus.TIMEOUT
+    assert resp.meta is not None
+    assert resp.meta.resolved_via == "browser"

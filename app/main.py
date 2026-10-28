@@ -58,6 +58,7 @@ def build_components(
         max_redirects=settings.max_redirects,
         max_response_bytes=settings.max_response_bytes,
         user_agent=settings.user_agent,
+        delay=settings.cloudscraper_delay,
     )
     browser_agent = BrowserAgent(
         analyzer,
@@ -68,6 +69,7 @@ def build_components(
         countdown_max_seconds=settings.browser_countdown_max_seconds,
         user_agent=settings.user_agent,
         slow_mo_ms=settings.browser_slow_mo_ms,
+        settle_timeout_ms=settings.browser_settle_timeout_ms,
     )
     resolver = LinkResolver(settings, validator, analyzer, http_client, browser_agent)
     rate_limiter = SlidingWindowRateLimiter(

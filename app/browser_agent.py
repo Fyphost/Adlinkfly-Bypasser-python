@@ -149,6 +149,17 @@ def decide_browser_action(
     return ActionDecision(BrowserActionType.GIVE_UP, reason="no actionable element found")
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Heuristically detect a Playwright timeout without importing its types.
+
+    Keeping :class:`BrowserAgent._drive` free of any ``playwright`` import makes
+    the navigation loop unit-testable with a fake page object. Playwright raises
+    ``playwright.async_api.TimeoutError`` whose class name contains "Timeout".
+    """
+
+    return "timeout" in type(exc).__name__.lower()
+
+
 class BrowserAgent:
     """Manage a shared Chromium instance and resolve links via navigation."""
 
@@ -160,10 +171,11 @@ class BrowserAgent:
         headless: bool = True,
         navigation_timeout_ms: int = 20_000,
         max_steps: int = 8,
-        countdown_max_seconds: float = 30.0,
+        countdown_max_seconds: float = 20.0,
         user_agent: str = "Mozilla/5.0",
         slow_mo_ms: int = 0,
         max_wait_retries: int = 3,
+        settle_timeout_ms: int = 2_500,
     ) -> None:
         self.analyzer = analyzer
         self.validator = validator
@@ -174,6 +186,7 @@ class BrowserAgent:
         self.user_agent = user_agent
         self.slow_mo_ms = slow_mo_ms
         self.max_wait_retries = max_wait_retries
+        self.settle_timeout_ms = settle_timeout_ms
 
         self._playwright: Any = None
         self._browser: Any = None
@@ -234,13 +247,21 @@ class BrowserAgent:
     # ------------------------------------------------------------------ #
     # Resolution                                                          #
     # ------------------------------------------------------------------ #
-    async def resolve(self, url: str, *, source_host: str) -> BrowserResult:
-        """Resolve ``url`` by driving a fresh, isolated browser context."""
+    async def resolve(
+        self, url: str, *, source_host: str, budget: float | None = None
+    ) -> BrowserResult:
+        """Resolve ``url`` by driving a fresh, isolated browser context.
+
+        ``budget`` (seconds), when provided, bounds the entire browser phase:
+        the agent returns a structured result just before the budget elapses,
+        instead of letting an outer timeout cancel it mid-navigation.
+        """
 
         await self.start()
         if self._browser is None:  # pragma: no cover - start() raises otherwise
             raise BrowserUnavailableError("Browser is not available")
 
+        deadline = (self._now() + budget) if budget is not None else None
         context = await self._browser.new_context(
             user_agent=self.user_agent,
             java_script_enabled=True,
@@ -251,8 +272,7 @@ class BrowserAgent:
             page = await context.new_page()
             page.set_default_navigation_timeout(self.navigation_timeout_ms)
             page.set_default_timeout(self.navigation_timeout_ms)
-            await self.navigate_initial(page, url)
-            return await self._drive(page, source_host=source_host)
+            return await self._drive(page, url, source_host=source_host, deadline=deadline)
         finally:
             # Per-request context is always torn down to free resources & state.
             try:
@@ -260,53 +280,71 @@ class BrowserAgent:
             except Exception:
                 logger.debug("Error closing browser context", exc_info=True)
 
-    async def _drive(self, page: Any, *, source_host: str) -> BrowserResult:
-        from playwright.async_api import Error as PlaywrightError
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
+    async def _drive(
+        self, page: Any, url: str, *, source_host: str, deadline: float | None = None
+    ) -> BrowserResult:
         steps = 0
         wait_retries = 0
 
-        # The initial navigation has already been performed by resolve() via
-        # navigate_initial(); each iteration inspects the current page and acts.
-        for steps in range(1, self.max_steps + 1):
+        # Initial navigation (bounded). A timeout is non-fatal -- we still try to
+        # analyse whatever rendered; a hard navigation error is terminal.
+        goto_timeout = self._wait_ms(self.navigation_timeout_ms, deadline)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
+        except Exception as exc:
+            if not _is_timeout_error(exc):
+                return BrowserResult(
+                    status=ResolveStatus.FAILED,
+                    steps=0,
+                    final_url=url,
+                    message=f"initial navigation failed: {exc}",
+                )
+            logger.debug("initial navigation timed out; analysing partial page")
+
+        for step in range(1, self.max_steps + 1):
+            if self._deadline_exceeded(deadline):
+                return BrowserResult(
+                    status=ResolveStatus.FAILED,
+                    steps=steps,
+                    final_url=page.url,
+                    message="browser time budget exhausted before resolution",
+                )
+            steps = step
             current_url = page.url
             try:
                 html = await page.content()
-            except PlaywrightError as exc:
+            except Exception as exc:
                 logger.debug("Could not read page content: %s", exc)
                 html = ""
 
-            analysis = self.analyzer.analyze(
-                html, base_url=current_url, source_host=source_host
-            )
+            analysis = self.analyzer.analyze(html, base_url=current_url, source_host=source_host)
             decision = decide_browser_action(
                 analysis, current_url=current_url, source_host=source_host
             )
             logger.debug(
                 "browser step",
-                extra={"step": steps, "url": current_url, "action": decision.action},
+                extra={"step": step, "url": current_url, "action": decision.action},
             )
 
             if decision.action is BrowserActionType.RETURN_DESTINATION:
                 return BrowserResult(
                     status=ResolveStatus.RESOLVED,
                     destination_url=decision.destination,
-                    steps=steps,
+                    steps=step,
                     final_url=current_url,
                     message=decision.reason,
                 )
             if decision.action is BrowserActionType.VERIFICATION_REQUIRED:
                 return BrowserResult(
                     status=ResolveStatus.VERIFICATION_REQUIRED,
-                    steps=steps,
+                    steps=step,
                     final_url=current_url,
                     message=decision.reason,
                 )
             if decision.action is BrowserActionType.GIVE_UP:
                 return BrowserResult(
                     status=ResolveStatus.FAILED,
-                    steps=steps,
+                    steps=step,
                     final_url=current_url,
                     message=decision.reason,
                 )
@@ -315,17 +353,17 @@ class BrowserAgent:
                 if wait_retries > self.max_wait_retries:
                     return BrowserResult(
                         status=ResolveStatus.FAILED,
-                        steps=steps,
+                        steps=step,
                         final_url=current_url,
                         message="no progress after waiting for dynamic content",
                     )
-                await self._wait_for_dynamic(page, PlaywrightTimeoutError)
+                await self._settle(page, deadline)
                 continue
 
             # CLICK_BUTTON or WAIT_COUNTDOWN
             wait_retries = 0
             assert decision.button is not None
-            await self._click_and_wait(page, decision.button, PlaywrightTimeoutError)
+            await self._click_and_wait(page, decision.button, deadline)
 
         return BrowserResult(
             status=ResolveStatus.FAILED,
@@ -334,51 +372,69 @@ class BrowserAgent:
             message=f"navigation limit ({self.max_steps} steps) reached",
         )
 
-    async def navigate_initial(self, page: Any, url: str) -> None:
-        """Perform the initial navigation to ``url``."""
+    # ------------------------------------------------------------------ #
+    # Time-budget helpers                                                 #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _now() -> float:
+        return asyncio.get_running_loop().time()
 
-        await page.goto(url, wait_until="domcontentloaded")
+    def _remaining_ms(self, deadline: float | None) -> int:
+        if deadline is None:
+            return self.navigation_timeout_ms
+        return int(max(0.0, (deadline - self._now()) * 1000))
 
-    async def _wait_for_dynamic(self, page: Any, timeout_exc: type[BaseException]) -> None:
-        try:
-            await page.wait_for_load_state("networkidle", timeout=self.navigation_timeout_ms)
-        except timeout_exc:
-            logger.debug("networkidle wait timed out")
+    def _wait_ms(self, desired_ms: int, deadline: float | None) -> int:
+        """Clamp ``desired_ms`` to the time remaining before ``deadline``."""
 
-    async def _click_and_wait(
-        self, page: Any, button: ButtonCandidate, timeout_exc: type[BaseException]
-    ) -> None:
-        """Click the chosen control and wait for navigation or settling.
+        if deadline is None:
+            return desired_ms
+        return max(1, min(desired_ms, self._remaining_ms(deadline)))
 
-        ``click`` auto-waits for the element to become actionable (visible,
-        enabled, stable), which transparently handles countdowns that merely
-        disable the button. The timeout budget includes the countdown window.
+    def _deadline_exceeded(self, deadline: float | None) -> bool:
+        return deadline is not None and self._now() >= deadline
+
+    async def _settle(self, page: Any, deadline: float | None) -> None:
+        """Briefly, boundedly wait for dynamic content to settle.
+
+        A short explicit wait -- not an open-ended ``networkidle`` wait, which
+        never settles on ad-heavy shortener pages.
         """
 
-        click_timeout = int(self.navigation_timeout_ms + self.countdown_max_seconds * 1000)
+        timeout = self._wait_ms(self.settle_timeout_ms, deadline)
+        try:
+            await page.wait_for_timeout(timeout)
+        except Exception as exc:
+            logger.debug("settle wait interrupted: %s", exc)
+
+    async def _click_and_wait(
+        self, page: Any, button: ButtonCandidate, deadline: float | None
+    ) -> None:
+        """Click the chosen control and wait (boundedly) for navigation.
+
+        ``click`` auto-waits for the element to become actionable (visible,
+        enabled, stable), transparently handling a countdown that only disables
+        the button. Every wait is clamped to the remaining time budget, and no
+        open-ended network waits are used.
+        """
+
+        click_timeout = self._wait_ms(int(self.countdown_max_seconds * 1000), deadline)
         locator = self._locate(page, button)
         before = page.url
         try:
             await locator.click(timeout=click_timeout)
-        except timeout_exc:
-            logger.debug("click timed out for button %r", button.text)
-            return
         except Exception as exc:
-            logger.debug("click failed for button %r: %s", button.text, exc)
+            logger.debug("click did not complete for %r: %s", button.text, exc)
             return
 
-        # Prefer an explicit URL-change condition; fall back to network settle.
+        # The real success signal is a URL change; fall back to a short settle
+        # for in-page (SPA) updates that do not change the URL.
+        url_timeout = self._wait_ms(self.navigation_timeout_ms, deadline)
         try:
-            await page.wait_for_url(
-                lambda candidate: candidate != before, timeout=self.navigation_timeout_ms
-            )
-        except timeout_exc:
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=self.navigation_timeout_ms
-                )
-            except timeout_exc:
-                logger.debug("post-click settle timed out")
+            await page.wait_for_url(lambda candidate: candidate != before, timeout=url_timeout)
+        except Exception as exc:
+            logger.debug("no URL change after click: %s", exc)
+            await self._settle(page, deadline)
 
     def _locate(self, page: Any, button: ButtonCandidate) -> Any:
         """Build a Playwright locator for ``button`` (id first, then role/text)."""
