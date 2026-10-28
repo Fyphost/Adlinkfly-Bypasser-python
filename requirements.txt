@@ -1,0 +1,12 @@
+# Runtime dependencies for the AdLinkFly resolver API.
+# Version ranges are production-sane; pin exact versions (e.g. with
+# `pip-compile`) before deploying for fully reproducible builds.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+cloudscraper>=1.2.71,<2.0
+playwright>=1.47,<2.0
+beautifulsoup4>=4.12,<5.0
+lxml>=5.2,<6.0

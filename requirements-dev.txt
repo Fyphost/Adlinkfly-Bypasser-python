@@ -1,0 +1,7 @@
+# Development/test dependencies (includes everything in requirements.txt).
+-r requirements.txt
+
+pytest>=8.2
+httpx>=0.27          # required by fastapi.testclient
+ruff>=0.6
+mypy>=1.11

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Step 1 - Please wait</title>
+</head>
+<body>
+  <h1>Generating your link</h1>
+  <p>Please wait <span id="timer">1</span> seconds before continuing.</p>
+  <button id="continue" disabled>Continue</button>
+
+  <script>
+    // The button is enabled only after a short countdown. Playwright's click
+    // auto-waits for the control to become actionable (enabled), so the agent
+    // must handle this without any fixed sleep.
+    var remaining = 1;
+    var timerEl = document.getElementById('timer');
+    var btn = document.getElementById('continue');
+    var tick = setInterval(function () {
+      remaining -= 1;
+      timerEl.textContent = String(Math.max(remaining, 0));
+      if (remaining <= 0) {
+        clearInterval(tick);
+        btn.disabled = false;
+      }
+    }, 1000);
+    btn.addEventListener('click', function () {
+      window.location.href = 'step2_final.html';
+    });
+  </script>
+</body>
+</html>

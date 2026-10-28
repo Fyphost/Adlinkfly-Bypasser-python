@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    image: adlinkfly-resolver:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: production
+    # Chromium is happier with more shared memory than the 64MB default.
+    shm_size: "1gb"
+    restart: unless-stopped
